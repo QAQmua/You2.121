@@ -1,0 +1,76 @@
+name: Build IPA (Direct Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26 # 👈 1. 升级到最新的 macOS 26 服务器
+    permissions:
+      contents: write 
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Xcode 环境
+        run: |
+          # 👈 2. 切换到支持 iOS 26 的最新版 Xcode
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer || true
+
+      - name: 预处理与清理代码
+        run: |
+          # 解压源码包
+          find . -maxdepth 2 -iname "*.zip" -exec unzip -o -q "{}" \;
+          
+          # 定位源码目录
+          SUB_PKG=$(find . -mindepth 2 -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1)
+          if [ -n "$SUB_PKG" ]; then 
+            cd "$SUB_PKG"
+          else 
+            cd "$(find . -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1 || echo .)"
+          fi
+
+          # 清理冲突文件
+          find . -name "Assets.xcassets" | tail -n +2 | while read -r dup; do rm -rf "$dup"; done
+          find . -name "*.swift" -exec sed -i '' 's/\.topBarLeading/\.navigationBarLeading/g' {} +
+          
+          # ❌ 已经删除了强行把 iOS 26 降级成 iOS 17 的那几行坑爹代码！
+
+      - name: 开始云端编译并注入身份证号
+        run: |
+          cd "$(find . -name "Package.swift" -not -path "*/.*" -exec dirname {} \; | head -n 1 || echo .)"
+          
+          SCHEME=$(xcodebuild -list 2>/dev/null | awk '/Schemes:/{flag=1;next} flag && NF{print $1; exit}')
+          if [ -z "$SCHEME" ]; then SCHEME="You"; fi
+          echo "编译 Scheme: $SCHEME"
+
+          xcodebuild build \
+            -scheme "$SCHEME" \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 
+            
+          mkdir -p Payload
+          APP_PATH=$(find ./build -name "*.app" | head -n 1)
+          cp -r "$APP_PATH" Payload/
+          
+          # 🚀🚀🚀 核心魔法：全自动注入 Bundle ID 和 App 名字 🚀🚀🚀
+          plutil -replace CFBundleIdentifier -string "com.youdong.app" Payload/*.app/Info.plist
+          plutil -replace CFBundleName -string "幼刀" Payload/*.app/Info.plist || true
+          plutil -replace CFBundleDisplayName -string "幼刀" Payload/*.app/Info.plist || true
+          
+          # 打包成 ipa
+          zip -r output.ipa Payload
+          mv output.ipa $GITHUB_WORKSPACE/You.ipa
+
+      - name: 发布直装版 IPA 到 Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.${{ github.run_number }}"
+          name: "最新编译直装版 (直接下载 IPA)"
+          files: You.ipa
+          token: ${{ secrets.GITHUB_TOKEN }}
